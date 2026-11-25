@@ -8,3 +8,6 @@ model-*/
 *.pt
 *.onnx
 คำสั่ง-*.txt
+.env
+.streamlit/secrets.toml
+*.weights

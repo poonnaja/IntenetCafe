@@ -1,10 +1,7 @@
 
-from pathlib import Path
-
 import streamlit as st
 import pandas as pd
-
-CSV_FILE = Path(__file__).with_name("equipment_log.csv")
+from supabase import create_client
 
 st.set_page_config(
     page_title="Internet Cafe Monitor",
@@ -22,61 +19,113 @@ EQUIPMENT = [
     "Controller"
 ]
 
+TABLE_ID = "TABLE-01"
+OFFLINE_AFTER = 65
+
+
+@st.cache_resource
+def connect_supabase():
+    return create_client(
+        st.secrets["SUPABASE_URL"],
+        st.secrets["SUPABASE_SECRET_KEY"]
+    )
+
 
 @st.fragment(run_every="5s")
 def show_dashboard():
 
-    if not CSV_FILE.exists():
-        st.warning("ยังไม่พบไฟล์ equipment_log.csv")
-        return
-
     try:
-        df = pd.read_csv(
-            CSV_FILE,
-            encoding="utf-8-sig",
-            dtype=str
+        supabase = connect_supabase()
+
+        response = (
+            supabase.table("equipment_log")
+            .select("*")
+            .eq("table_id", TABLE_ID)
+            .order("created_at", desc=True)
+            .order("id", desc=True)
+            .limit(100)
+            .execute()
         )
-    except Exception:
-        st.warning("กำลังรออ่านข้อมูล CSV")
+
+        df = pd.DataFrame(response.data)
+
+    except Exception as e:
+        st.error("ไม่สามารถเชื่อมต่อ Supabase")
+        st.caption(type(e).__name__)
         return
 
     if df.empty:
-        st.warning("ยังไม่มีข้อมูล")
+        st.warning("ยังไม่มีข้อมูลใน Supabase")
         return
 
-    df.columns = df.columns.str.strip()
+    df = df.iloc[::-1].reset_index(drop=True)
 
-    if not all(name in df.columns for name in EQUIPMENT):
-        st.error("หัวตาราง CSV ไม่ตรงกับที่กำหนด")
-        st.write(df.columns.tolist())
-        return
+    df["Timestamp"] = pd.to_datetime(
+        df["created_at"],
+        utc=True,
+        errors="coerce",
+        format="mixed"
+    ).dt.tz_convert("Asia/Bangkok")
+
+    df["วันที่"] = df["Timestamp"].dt.strftime(
+        "%d/%m/%Y"
+    )
+
+    df["เวลา"] = df["Timestamp"].dt.strftime(
+        "%H:%M:%S"
+    )
+
+    df = df.rename(columns={
+        "table_id": "รหัสโต๊ะ",
+        "mouse": "Mouse",
+        "keyboard": "Keyboard",
+        "headset": "Headset",
+        "controller": "Controller",
+        "found_count": "จำนวนที่พบ",
+        "status": "สถานะ",
+        "missing_items": "อุปกรณ์ที่ไม่พบ"
+    })
 
     latest = df.iloc[-1].copy()
 
-    last_update = pd.to_datetime(
-        str(latest.get("วันที่", "")) + " " +
-        str(latest.get("เวลา", "")),
-        format="%d/%m/%Y %H:%M:%S",
-        errors="coerce"
-    )
+    last_update = latest["Timestamp"]
 
     if pd.isna(last_update):
-        st.warning("ไม่สามารถตรวจสอบเวลาล่าสุดได้")
+
+        st.warning("ไม่สามารถตรวจสอบเวลาล่าสุด")
         latest[EQUIPMENT] = "ไม่ทราบ"
 
     else:
+
         age = (
-            pd.Timestamp.now() - last_update
+            pd.Timestamp.now(tz="Asia/Bangkok")
+            - last_update
         ).total_seconds()
 
         st.caption(
             "อัปเดตล่าสุด: " +
-            last_update.strftime("%d/%m/%Y %H:%M:%S")
+            last_update.strftime(
+                "%d/%m/%Y %H:%M:%S"
+            )
         )
 
-        if age > 65:
-            st.error("ระบบ Offline หรือไม่มีข้อมูลใหม่")
+        if age > OFFLINE_AFTER:
+
+            st.error(
+                "🔴 Offline - ไม่มีข้อมูลใหม่"
+            )
+
             latest[EQUIPMENT] = "ไม่ทราบ"
+
+        elif latest["สถานะ"] == "ไม่มีข้อมูลล่าสุด":
+
+            st.warning(
+                "🟡 เชื่อมต่อ Cloud ได้ แต่ไม่มีข้อมูล MQTT ล่าสุด"
+            )
+
+        else:
+
+            st.success("🟢 System Online")
 
     found = sum(
         str(latest[name]).strip() == "พบ"
@@ -98,15 +147,24 @@ def show_dashboard():
     c4.metric("ไม่ทราบสถานะ", unknown)
 
     st.divider()
-    st.subheader("สถานะอุปกรณ์ TABLE-01")
+
+    st.subheader(
+        "สถานะอุปกรณ์ " + TABLE_ID
+    )
 
     if unknown:
+
         st.warning("ข้อมูลอุปกรณ์ไม่สมบูรณ์")
+
     elif not missing:
+
         st.success("อุปกรณ์ครบทั้งหมด")
+
     else:
+
         st.error(
-            "อุปกรณ์ที่ไม่พบ: " + ", ".join(missing)
+            "อุปกรณ์ที่ไม่พบ: " +
+            ", ".join(missing)
         )
 
     columns = st.columns(4)
@@ -116,20 +174,30 @@ def show_dashboard():
     for col, name, icon in zip(
         columns, EQUIPMENT, icons
     ):
+
         with col:
+
             st.subheader(icon + " " + name)
 
             status = str(latest[name]).strip()
 
             if status == "พบ":
+
                 st.success("พบอุปกรณ์")
+
             elif status == "ไม่พบ":
+
                 st.error("ไม่พบอุปกรณ์")
+
             else:
+
                 st.warning("ไม่ทราบสถานะ")
 
     st.divider()
-    st.subheader("กราฟจำนวนอุปกรณ์ที่ตรวจพบ")
+
+    st.subheader(
+        "กราฟจำนวนอุปกรณ์ที่ตรวจพบ"
+    )
 
     chart = df.tail(60).copy()
 
@@ -141,37 +209,64 @@ def show_dashboard():
         ["พบ", "ไม่พบ"]
     ).all(axis=1)
 
-    chart.loc[~valid, "จำนวนอุปกรณ์"] = float("nan")
+    chart.loc[
+        ~valid, "จำนวนอุปกรณ์"
+    ] = float("nan")
 
-    if "วันที่" in chart.columns and "เวลา" in chart.columns:
-        chart["Timestamp"] = pd.to_datetime(
-            chart["วันที่"] + " " + chart["เวลา"],
-            dayfirst=True,
-            errors="coerce"
-        )
+    chart = chart.dropna(
+        subset=["Timestamp"]
+    )
 
-        chart = chart.dropna(subset=["Timestamp"])
-        chart = chart.set_index("Timestamp")
+    chart["Timestamp"] = (
+        chart["Timestamp"].dt.tz_localize(None)
+    )
+
+    chart = chart.set_index("Timestamp")
 
     st.line_chart(chart["จำนวนอุปกรณ์"])
 
     st.divider()
+
     st.subheader("ประวัติการตรวจสอบ")
 
+    history = df[[
+        "วันที่",
+        "เวลา",
+        "รหัสโต๊ะ",
+        "Mouse",
+        "Keyboard",
+        "Headset",
+        "Controller",
+        "จำนวนที่พบ",
+        "สถานะ",
+        "อุปกรณ์ที่ไม่พบ"
+    ]].copy()
+
+    history["จำนวนที่พบ"] = (
+        history["จำนวนที่พบ"].astype("Int64")
+    )
+
     st.dataframe(
-        df.iloc[::-1].head(100),
+        history.iloc[::-1],
         use_container_width=True,
         hide_index=True
     )
 
+    csv_data = history.to_csv(
+        index=False
+    ).encode("utf-8-sig")
+
     st.download_button(
         label="ดาวน์โหลดประวัติ CSV",
-        data=CSV_FILE.read_bytes(),
+        data=csv_data,
         file_name="equipment_log.csv",
         mime="text/csv"
     )
 
-    st.caption("อ่านข้อมูลใหม่ทุก 5 วินาที")
+    st.caption(
+        "Cloud Database: Supabase | "
+        "อ่านข้อมูลใหม่ทุก 5 วินาที"
+    )
 
 
 show_dashboard()
