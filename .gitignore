@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+*.npj
+*.csv
+model-*/
+*.rar
+*.pth
+*.pt
+*.onnx
+คำสั่ง-*.txt
